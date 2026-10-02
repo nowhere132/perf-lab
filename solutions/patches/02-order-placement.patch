@@ -1,0 +1,101 @@
+--- a/app/src/main/java/lab/router/service/OrderService.java
++++ b/app/src/main/java/lab/router/service/OrderService.java
+@@ -16,7 +16,8 @@
+ import lab.router.risk.ExposureBook;
+ import lab.router.risk.RoutingStats;
+ import org.springframework.stereotype.Service;
+-import org.springframework.transaction.annotation.Transactional;
++import org.springframework.transaction.PlatformTransactionManager;
++import org.springframework.transaction.support.TransactionTemplate;
+ 
+ import java.math.BigDecimal;
+ 
+@@ -34,11 +35,12 @@
+     private final VenueGateway venueGateway;
+     private final ExposureBook exposureBook;
+     private final RoutingStats routingStats;
++    private final TransactionTemplate tx;
+ 
+     public OrderService(ReferenceData referenceData, OrderValidator validator, AccountRepository accounts,
+                         PositionRepository positions, OrderRepository orders, OrderEventRepository events,
+                         RiskClient riskClient, VenueGateway venueGateway, ExposureBook exposureBook,
+-                        RoutingStats routingStats) {
++                        RoutingStats routingStats, PlatformTransactionManager transactionManager) {
+         this.referenceData = referenceData;
+         this.validator = validator;
+         this.accounts = accounts;
+@@ -49,20 +51,38 @@
+         this.venueGateway = venueGateway;
+         this.exposureBook = exposureBook;
+         this.routingStats = routingStats;
++        this.tx = new TransactionTemplate(transactionManager);
+     }
+ 
+     /**
+-     * Validate, reserve cash (buy) or stock (sell), clear pre-trade risk, send
+-     * to the venue and record the outcome. Any failure rolls the whole thing
+-     * back, so a reservation can never outlive an order that did not go out.
++     * Validate and clear pre-trade risk with no database connection held, then
++     * three short steps: reserve + record the order (one transaction), send to
++     * the venue (no transaction), record the outcome (one transaction). If the
++     * venue call fails the reservation is released by a compensating transaction.
+      */
+-    @Transactional
+     public Order place(PlaceOrderCommand cmd) {
+         SymbolRef symbol = referenceData.find(cmd.symbol());
+         if (symbol == null) throw new OrderRejectedException("unknown symbol " + cmd.symbol());
+         validator.validate(cmd, symbol);
+-
+         BigDecimal notional = cmd.price().multiply(BigDecimal.valueOf(cmd.qty()));
++
++        if (!riskClient.approve(cmd.accountId(), cmd.symbol(), cmd.side().name(), cmd.qty(), cmd.price()))
++            throw new OrderRejectedException("rejected by pre-trade risk");
++
++        Order order = tx.execute(status -> reserve(cmd, symbol, notional));
++        String venueOrderId;
++        try {
++            venueOrderId = venueGateway.send(order);
++        } catch (RuntimeException e) {
++            tx.executeWithoutResult(status -> release(order.getId(), notional));
++            throw e;
++        }
++        Order accepted = tx.execute(status -> accept(order.getId(), venueOrderId));
++        routingStats.record(RoutingStats.boardIndex(symbol.board()), notional);
++        return accepted;
++    }
++
++    private Order reserve(PlaceOrderCommand cmd, SymbolRef symbol, BigDecimal notional) {
+         Account account = accounts.lockById(cmd.accountId())
+                 .orElseThrow(() -> new OrderRejectedException("unknown account " + cmd.accountId()));
+         if (!account.isActive()) throw new OrderRejectedException("account is not active");
+@@ -81,15 +101,24 @@
+         BigDecimal limit = EXPOSURE_LIMIT_PER_TIER.multiply(BigDecimal.valueOf(account.getTier() + 1));
+         if (!exposureBook.tryAdd(account.getId(), notional, limit))
+             throw new OrderRejectedException("intraday exposure limit reached");
+-        if (!riskClient.approve(cmd.accountId(), cmd.symbol(), cmd.side().name(), cmd.qty(), cmd.price()))
+-            throw new OrderRejectedException("rejected by pre-trade risk");
++        return orders.save(new Order(cmd.accountId(), cmd.symbol(), cmd.side(), cmd.qty(), cmd.price(), symbol.board()));
++    }
+ 
+-        Order order = orders.save(new Order(cmd.accountId(), cmd.symbol(), cmd.side(), cmd.qty(), cmd.price(), symbol.board()));
+-        String venueOrderId = venueGateway.send(order);
++    private Order accept(Long orderId, String venueOrderId) {
++        Order order = orders.findById(orderId).orElseThrow();
+         order.accepted(venueOrderId);
+         events.save(new OrderEvent(order, "ACCEPTED", "venue=" + order.getVenue() + " id=" + venueOrderId));
+-
+-        routingStats.record(RoutingStats.boardIndex(symbol.board()), notional);
+         return order;
+     }
++
++    private void release(Long orderId, BigDecimal notional) {
++        Order order = orders.findById(orderId).orElseThrow();
++        order.rejected();
++        if (order.getSide() == Side.BUY) {
++            accounts.lockById(order.getAccountId()).orElseThrow().release(notional);
++        } else {
++            positions.lock(order.getAccountId(), order.getSymbol()).orElseThrow().release(order.getQty());
++        }
++        events.save(new OrderEvent(order, "REJECTED", "venue unavailable"));
++    }
+ }

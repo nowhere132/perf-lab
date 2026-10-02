@@ -1,0 +1,6 @@
+# Operations now change trading limits intraday, so the router refreshes its
+# reference data every ten seconds instead of at start of day.
+services:
+  app:
+    environment:
+      ROUTER_REFDATA_REFRESH_INTERVAL: PT10S

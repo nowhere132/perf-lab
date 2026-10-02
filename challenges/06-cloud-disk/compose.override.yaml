@@ -1,0 +1,9 @@
+# The database as provisioned in the new datacentre: its data sits on a
+# network volume with 400 provisioned write IOPS.
+services:
+  db:
+    blkio_config:
+      device_write_iops:
+        - {path: "${LAB_DISK}", rate: 400}
+    volumes:
+      - ./challenges/06-cloud-disk/postgresql.conf:/etc/postgresql/postgresql.conf:ro

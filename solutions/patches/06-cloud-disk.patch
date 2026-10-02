@@ -1,0 +1,25 @@
+--- a/challenges/06-cloud-disk/postgresql.conf
++++ b/challenges/06-cloud-disk/postgresql.conf
+@@ -2,7 +2,21 @@
+ # Started from the file initdb generates; only what we had to change is set.
+ listen_addresses = '*'
+ max_connections = 60
+-shared_buffers = 128MB
++
++# Big enough to keep the hot pages (accounts, positions, their indexes) dirty
++# in memory until a checkpoint, instead of evicting them into the OS, whose
++# writeback then spends the volume's IOPS budget.
++shared_buffers = 768MB
++
++# Group commit: wait up to 2 ms for other commits so one WAL flush carries many.
++commit_delay = 2000
++commit_siblings = 2
++
++# Checkpoints far apart and spread out: each hot page is written once per
++# checkpoint, and logged in full (full-page image) once per checkpoint.
++max_wal_size = 8GB
++checkpoint_timeout = 30min
++wal_compression = lz4
+ 
+ shared_preload_libraries = 'pg_stat_statements'
+ track_io_timing = on

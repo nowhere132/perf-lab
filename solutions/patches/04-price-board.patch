@@ -1,0 +1,15 @@
+--- a/challenges/04-price-board/compose.override.yaml
++++ b/challenges/04-price-board/compose.override.yaml
+@@ -1,9 +1,7 @@
+-# The router as deployed for the price-board rollout: a 768 MiB container,
+-# and a busy market session.
+ services:
+   app:
+-    mem_limit: 768m
+-    memswap_limit: 768m
++    mem_limit: 1g
++    memswap_limit: 1g
+     environment:
+-      JDK_JAVA_OPTIONS: "-Xms400m -Xmx400m"
++      JDK_JAVA_OPTIONS: "-Xms640m -Xmx640m -XX:+UseG1GC"
+       ROUTER_MARKET_TRADES_PER_SECOND: 50000

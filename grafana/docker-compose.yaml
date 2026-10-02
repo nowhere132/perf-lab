@@ -1,0 +1,18 @@
+# network_mode: host so Grafana reaches your host Postgres on 127.0.0.1:5432
+# without touching listen_addresses or pg_hba. Grafana lands on localhost:3000.
+services:
+  grafana:
+    image: grafana/grafana
+    container_name: perflab_grafana
+    network_mode: host
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: "dark"
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+      - perflab_grafana_data:/var/lib/grafana
+volumes:
+  perflab_grafana_data:

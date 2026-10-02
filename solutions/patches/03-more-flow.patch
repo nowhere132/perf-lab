@@ -1,0 +1,63 @@
+--- a/app/src/main/java/lab/router/gateway/VenueGateway.java
++++ b/app/src/main/java/lab/router/gateway/VenueGateway.java
+@@ -6,28 +6,50 @@
+ 
+ import java.net.http.HttpClient;
+ import java.time.Duration;
++import java.util.HashMap;
+ import java.util.Map;
++import java.util.concurrent.ArrayBlockingQueue;
++import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.TimeUnit;
+ 
+-/** Routes an order to the exchange it is listed on. */
++/**
++ * Routes an order to the exchange it is listed on. Each venue session must
++ * stay strictly sequential, so throughput comes from holding several sessions
++ * per venue (the venue allows 16) and giving each order a free one.
++ */
+ @Component
+ public class VenueGateway {
+-    private final Map<String, VenueSession> sessions;
++    private final Map<String, BlockingQueue<VenueSession>> pools = new HashMap<>();
+ 
+-    public VenueGateway(@Value("${router.venue-url}") String baseUrl) {
++    public VenueGateway(@Value("${router.venue-url}") String baseUrl,
++                        @Value("${router.venue-sessions:12}") int sessionsPerVenue) {
+         HttpClient http = HttpClient.newBuilder()
+                 .version(HttpClient.Version.HTTP_1_1)
+                 .connectTimeout(Duration.ofSeconds(2))
+                 .build();
+-        this.sessions = Map.of(
+-                "HOSE", new VenueSession(http, baseUrl, "HOSE", 1),
+-                "HNX", new VenueSession(http, baseUrl, "HNX", 1),
+-                "UPCOM", new VenueSession(http, baseUrl, "UPCOM", 1));
++        for (String venue : new String[]{"HOSE", "HNX", "UPCOM"}) {
++            BlockingQueue<VenueSession> pool = new ArrayBlockingQueue<>(sessionsPerVenue);
++            for (int n = 1; n <= sessionsPerVenue; n++) pool.add(new VenueSession(http, baseUrl, venue, n));
++            pools.put(venue, pool);
++        }
+     }
+ 
+     /** @return the order id assigned by the venue */
+     public String send(Order order) {
+-        VenueSession session = sessions.get(order.getVenue());
+-        if (session == null) throw new GatewayException("no route to " + order.getVenue());
+-        return session.send(order);
++        BlockingQueue<VenueSession> pool = pools.get(order.getVenue());
++        if (pool == null) throw new GatewayException("no route to " + order.getVenue());
++        VenueSession session;
++        try {
++            session = pool.poll(2, TimeUnit.SECONDS);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            throw new GatewayException("interrupted", e);
++        }
++        if (session == null) throw new GatewayException("no free session to " + order.getVenue());
++        try {
++            return session.send(order);
++        } finally {
++            pool.add(session);
++        }
+     }
+ }

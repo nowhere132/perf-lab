@@ -1,0 +1,108 @@
+--- a/app/src/main/java/lab/router/risk/ExposureBook.java
++++ b/app/src/main/java/lab/router/risk/ExposureBook.java
+@@ -1,37 +1,60 @@
+ package lab.router.risk;
+ 
+ import java.math.BigDecimal;
+-import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.AtomicLongArray;
++import java.util.concurrent.atomic.AtomicReferenceArray;
+ 
+ /**
+  * Intraday gross exposure per account (sum of the notional of every order
+  * accepted today). Checked on every order before it leaves the building, so
+  * it lives in memory.
++ *
++ * Account ids are dense, so exposure is a flat table of longs (whole VND)
++ * indexed by id, allocated a page at a time: one cache miss per check, no
++ * boxing, no allocation.
+  */
+ public class ExposureBook {
+-    private final ConcurrentHashMap<Long, BigDecimal> exposure = new ConcurrentHashMap<>();
++    private static final int PAGE_BITS = 16, PAGE_SIZE = 1 << PAGE_BITS, PAGE_MASK = PAGE_SIZE - 1;
++
++    private final AtomicReferenceArray<AtomicLongArray> pages = new AtomicReferenceArray<>(1 << 15);
+ 
+     /** Adds notional to the account's exposure unless that would exceed limit. */
+     public boolean tryAdd(long accountId, BigDecimal notional, BigDecimal limit) {
+-        boolean[] ok = {true};
+-        exposure.compute(accountId, (id, current) -> {
+-            BigDecimal next = current == null ? notional : current.add(notional);
+-            if (next.compareTo(limit) > 0) {
+-                ok[0] = false;
+-                return current;
+-            }
+-            return next;
+-        });
+-        return ok[0];
++        long add = notional.longValueExact(), max = limit.longValueExact();
++        AtomicLongArray page = page(accountId);
++        int slot = (int) (accountId & PAGE_MASK);
++        while (true) {
++            long current = page.get(slot);
++            long next = current + add;
++            if (next > max) return false;
++            if (page.compareAndSet(slot, current, next)) return true;
++        }
+     }
+ 
+     public BigDecimal of(long accountId) {
+-        return exposure.getOrDefault(accountId, BigDecimal.ZERO);
++        AtomicLongArray page = pages.get((int) (accountId >>> PAGE_BITS));
++        return page == null ? BigDecimal.ZERO : BigDecimal.valueOf(page.get((int) (accountId & PAGE_MASK)));
+     }
+ 
+     public BigDecimal total() {
+         BigDecimal sum = BigDecimal.ZERO;
+-        for (BigDecimal v : exposure.values()) sum = sum.add(v);
++        for (int p = 0; p < pages.length(); p++) {
++            AtomicLongArray page = pages.get(p);
++            if (page == null) continue;
++            long pageSum = 0;
++            for (int i = 0; i < PAGE_SIZE; i++) pageSum += page.get(i);
++            sum = sum.add(BigDecimal.valueOf(pageSum));
++        }
+         return sum;
+     }
++
++    private AtomicLongArray page(long accountId) {
++        int index = (int) (accountId >>> PAGE_BITS);
++        AtomicLongArray page = pages.get(index);
++        if (page == null) {
++            pages.compareAndSet(index, null, new AtomicLongArray(PAGE_SIZE));
++            page = pages.get(index);
++        }
++        return page;
++    }
+ }
+--- a/app/src/main/java/lab/router/risk/RoutingStats.java
++++ b/app/src/main/java/lab/router/risk/RoutingStats.java
+@@ -7,8 +7,10 @@
+ public class RoutingStats {
+     public static final int HOSE = 0, HNX = 1, UPCOM = 2;
+ 
+-    private final AtomicLongArray orders = new AtomicLongArray(3);
+-    private final AtomicLongArray notional = new AtomicLongArray(3);
++    // Each board's pair of counters sits 128 bytes from the next board's, so
++    // threads working different boards never write to the same cache line.
++    private static final int STRIDE = 16;
++    private final AtomicLongArray counters = new AtomicLongArray(STRIDE * 5);
+ 
+     public static int boardIndex(String board) {
+         return switch (board) {
+@@ -19,10 +21,11 @@
+     }
+ 
+     public void record(int board, BigDecimal orderNotional) {
+-        orders.incrementAndGet(board);
+-        notional.addAndGet(board, orderNotional.longValue());
++        int base = (board + 1) * STRIDE;
++        counters.incrementAndGet(base);
++        counters.addAndGet(base + 1, orderNotional.longValue());
+     }
+ 
+-    public long orders(int board) { return orders.get(board); }
+-    public long notional(int board) { return notional.get(board); }
++    public long orders(int board) { return counters.get((board + 1) * STRIDE); }
++    public long notional(int board) { return counters.get((board + 1) * STRIDE + 1); }
+ }

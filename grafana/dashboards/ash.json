@@ -1,0 +1,555 @@
+{
+  "uid": "perflab-ash",
+  "title": "perf-lab \u00b7 Active Session History",
+  "tags": [
+    "perflab"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Read the panels in this order",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 6
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**1 \u00b7 Throughput** \u2014 is the system doing more or less work? Nothing below means anything without this.\n\n**2 \u00b7 AAS by wait class** \u2014 *why* it's doing that much. AAS = backends simultaneously busy. `CPU` near 12 (your cores) = saturated. `Lock` high while `CPU` is flat = contention, and no cache fixes it. `LWLock/WALInsert` climbing = you've hit Postgres's internal write serialization.\n\n**3 \u00b7 Waiting for the client** \u2014 if this is high, **your load generator is the bottleneck, not Postgres**, and every number on this page understates the database.\n\n**4 \u00b7 Blocked sessions / oldest txn** \u2014 non-zero blocked means row contention; a sawtooth in oldest txn means a batch job is holding locks across its whole runtime.\n\nRule of thumb: *throughput flat + CPU pinned* = capacity ceiling (scale up). *throughput flat or falling + CPU idle* = contention or an upstream limit (scaling up does nothing)."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "1 \u00b7 Throughput (commits/sec)",
+      "description": "From pg_stat_database deltas, sampled at 1 Hz. Should match pgbench's reported tps.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "perflab"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "perflab"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "\nSELECT $__timeGroup(ts, $__interval) AS \"time\", 'commits/s' AS metric,\n       max(commits_per_s) AS value\nFROM ash.tps WHERE $__timeFilter(ts) AND commits_per_s IS NOT NULL GROUP BY 1\nUNION ALL\nSELECT $__timeGroup(ts, $__interval), 'rollbacks/s', max(rollbacks_per_s)\nFROM ash.tps WHERE $__timeFilter(ts) AND rollbacks_per_s IS NOT NULL GROUP BY 1\nORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "gradientMode": "opacity"
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "2 \u00b7 Average Active Sessions by wait class",
+      "description": "Stacked height = total DB concurrency. Dashed line = your 12 cores.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "perflab"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "perflab"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "\nWITH n AS (\n  SELECT $__timeGroup(ts, $__interval) AS t, count(DISTINCT ts) AS samples\n  FROM ash.samples WHERE $__timeFilter(ts) GROUP BY 1\n)\nSELECT n.t AS \"time\", CASE WHEN s.wait_event_type IS NULL THEN 'CPU' ELSE s.wait_event_type END AS metric,\n       count(*)::float / max(n.samples) AS value\nFROM ash.samples s\nJOIN n ON n.t = $__timeGroup(s.ts, $__interval)\nWHERE $__timeFilter(s.ts) \nGROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 45,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "gradientMode": "opacity",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 12
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "3 \u00b7 DB time spent waiting for the client",
+      "description": "ClientRead: the backend finished and is idle waiting for the next statement. High here means the generator, not the database, set your numbers.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "perflab"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "perflab"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "\nSELECT $__timeGroup(ts, $__interval) AS \"time\",\n       'DB time spent waiting for the client' AS metric,\n       100.0 * count(*) FILTER (WHERE wait_event = 'ClientRead')\n            / nullif(count(*), 0) AS value\nFROM ash.samples WHERE $__timeFilter(ts) GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "gradientMode": "opacity"
+          },
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Wait events in detail",
+      "description": "LWLock/WALInsert = WAL insertion serialization. LWLock/XidGen = txn-id assignment. Lock/transactionid = waiting on a row another transaction wrote.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "perflab"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 15,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "perflab"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "\nWITH n AS (\n  SELECT $__timeGroup(ts, $__interval) AS t, count(DISTINCT ts) AS samples\n  FROM ash.samples WHERE $__timeFilter(ts) GROUP BY 1\n)\nSELECT n.t AS \"time\", coalesce(s.wait_event_type,'CPU') || ' / ' || coalesce(s.wait_event,'on-cpu') AS metric,\n       count(*)::float / max(n.samples) AS value\nFROM ash.samples s\nJOIN n ON n.t = $__timeGroup(s.ts, $__interval)\nWHERE $__timeFilter(s.ts) \nGROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 45,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "gradientMode": "opacity",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "4 \u00b7 Sessions blocked by another session",
+      "description": "Non-zero means lock contention, full stop.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "perflab"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 15,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "perflab"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "\nWITH n AS (\n  SELECT $__timeGroup(ts, $__interval) AS t, count(DISTINCT ts) AS samples\n  FROM ash.samples WHERE $__timeFilter(ts) GROUP BY 1\n)\nSELECT n.t AS \"time\", 'sessions blocked' AS metric,\n       count(*)::float / max(n.samples) AS value\nFROM ash.samples s\nJOIN n ON n.t = $__timeGroup(s.ts, $__interval)\nWHERE $__timeFilter(s.ts) AND s.blocking_pids IS NOT NULL\nGROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "gradientMode": "opacity"
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "WAL write volume",
+      "description": "MB/s of WAL generated. Two UPDATEs per transaction cost roughly twice the WAL of one.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "perflab"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "perflab"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "\nSELECT $__timeGroup(ts, $__interval) AS \"time\", 'WAL MB/s' AS metric,\n       max(wal_mb_per_s) AS value\nFROM ash.tps WHERE $__timeFilter(ts) AND wal_mb_per_s IS NOT NULL GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "gradientMode": "opacity"
+          },
+          "unit": "MBs",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Oldest open transaction",
+      "description": "Batch jobs and idle-in-transaction appear here as a sawtooth.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "perflab"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 23,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "perflab"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "\nSELECT $__timeGroup(ts, $__interval) AS \"time\", 'oldest open txn' AS metric,\n       max(xact_age_ms) / 1000.0 AS value\nFROM ash.samples WHERE $__timeFilter(ts) GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "gradientMode": "opacity"
+          },
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Active sessions by scenario (application_name)",
+      "description": "run.sh and mix.sh set PGAPPNAME, so mixed runs stay attributable.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "perflab"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 23,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "perflab"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "\nWITH n AS (\n  SELECT $__timeGroup(ts, $__interval) AS t, count(DISTINCT ts) AS samples\n  FROM ash.samples WHERE $__timeFilter(ts) GROUP BY 1\n)\nSELECT n.t AS \"time\", coalesce(nullif(s.application_name,''),'(unnamed)') AS metric,\n       count(*)::float / max(n.samples) AS value\nFROM ash.samples s\nJOIN n ON n.t = $__timeGroup(s.ts, $__interval)\nWHERE $__timeFilter(s.ts) \nGROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 45,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "gradientMode": "opacity",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

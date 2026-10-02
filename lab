@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# perf-lab: a series of performance challenges against one order-routing stack.
+#   ./lab            list challenges and progress
+#   ./lab help       every command
+set -euo pipefail
+export LC_ALL=C
+cd "$(dirname "$(readlink -f "$0")")"
+
+STATE=.lab
+mkdir -p "$STATE/passed" results
+APP_URL=http://localhost:8080
+SIM_URL=http://localhost:9000
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
+die()  { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+
+current() { cat "$STATE/current" 2>/dev/null || echo 1; }
+nn()      { printf '%02d' "$((10#$1))"; }
+cdir()    { local d; d=$(ls -d challenges/"$(nn "$1")"-*/ 2>/dev/null | head -1); [ -n "$d" ] || die "no challenge $1"; echo "${d%/}"; }
+
+# The disk behind Docker's volumes; challenge overlays may put an IOPS cap on it.
+lab_disk() {
+  local src pk
+  src=$(findmnt -no SOURCE -T "$(docker info -f '{{.DockerRootDir}}')" 2>/dev/null || true)
+  pk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1 || true)
+  echo "/dev/${pk:-$(basename "${src:-sda}")}"
+}
+
+dc() {
+  local files=(-f compose.yaml) o
+  o="$(cdir "$(current)")/compose.override.yaml"
+  [ -f "$o" ] && files+=(-f "$o")
+  LAB_DISK=${LAB_DISK:-$(lab_disk)} docker compose "${files[@]}" "$@"
+}
+
+cid() { dc ps -q "$1" 2>/dev/null | head -1; }
+
+wait_healthy() {
+  local svc=$1 limit=${2:-300} t=0 id st
+  while :; do
+    id=$(cid "$svc"); st=$([ -n "$id" ] && docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo none)
+    [ "$st" = healthy ] && return 0
+    [ "$t" -ge "$limit" ] && die "$svc is '$st' after ${limit}s -- see ./lab logs $svc"
+    [ $((t % 15)) -eq 0 ] && [ "$t" -gt 0 ] && dim "  waiting for $svc ($st, ${t}s) ..."
+    sleep 3; t=$((t + 3))
+  done
+}
+
+psql_q() { dc exec -T db psql -U postgres -d router -qAXt "$@"; }
+
+build() {   # quiet when it works, the compiler's complaints when it does not
+  local log="$STATE/build.log"
+  dc build "$@" > "$log" 2>&1 || { grep -E 'ERROR|error:' "$log" | head -30; die "build failed (full log: $log)"; }
+}
+
+# ── stack ────────────────────────────────────────────────────────────────────
+cmd_start() {
+  local n=${1:-$(current)}; cdir "$n" >/dev/null
+  echo "$((10#$n))" > "$STATE/current"
+  bold "Starting challenge $(nn "$n") — $(basename "$(cdir "$n")")"
+  build app exchange-sim
+  dc up -d --remove-orphans --quiet-pull > "$STATE/up.log" 2>&1 || { tail -5 "$STATE/up.log"; die "docker compose up failed"; }
+  dim "  database (first start seeds 1M accounts, ~1 min) ..."
+  wait_healthy db 600
+  cmd_migrate quiet
+  wait_healthy app 180
+  echo
+  cmd_brief "$n"
+}
+
+cmd_deploy() {
+  bold "Rebuilding and restarting the app"
+  build app
+  dc up -d app > "$STATE/up.log" 2>&1 || { tail -5 "$STATE/up.log"; die "docker compose up failed"; }
+  wait_healthy app 180
+  dim "  app is up. JIT is cold; ./lab test warms it up before measuring."
+}
+
+cmd_restart() {
+  local s
+  dc up -d --force-recreate --no-deps "${@:-app}" 2>&1 | grep -iE 'error' || true
+  for s in "${@:-app}"; do wait_healthy "$s" 300; done
+  dc up -d >/dev/null 2>&1; wait_healthy app 180
+}
+cmd_down()    { dc down --remove-orphans; }
+cmd_logs()    { dc logs --tail "${TAIL:-200}" "${@:-app}"; }
+
+cmd_migrate() {
+  local f name applied=0
+  for f in db/migrations/*.sql; do
+    [ -e "$f" ] || continue
+    name=$(basename "$f")
+    [ "$(psql_q -c "select 1 from lab_migrations where file = '$name'")" = 1 ] && continue
+    bold "  applying $name"
+    dc exec -T db psql -U postgres -d router -v ON_ERROR_STOP=1 -q < "$f"
+    psql_q -c "insert into lab_migrations(file) values ('$name')"
+    applied=$((applied + 1))
+  done
+  [ "${1:-}" = quiet ] || echo "  $applied migration(s) applied"
+}
+
+cmd_reseed() {
+  bold "Dropping the database volume and seeding again (your db/migrations are re-applied)"
+  dc rm -sf db app >/dev/null 2>&1 || true
+  docker volume rm perflab_dbdata >/dev/null
+  cmd_start "$(current)"
+}
+
+# ── challenges ───────────────────────────────────────────────────────────────
+cmd_list() {
+  local d n title mark
+  bold "perf-lab challenges"
+  for d in challenges/[0-9][0-9]-*/; do
+    n=$(basename "$d" | cut -c1-2)
+    title=$(sed -n 's/^TITLE="\(.*\)"$/\1/p' "$d/challenge.env")
+    mark="    "; [ -f "$STATE/passed/$n" ] && mark="PASS"
+    printf '  %s  %s  %s%s\n' "$mark" "$n" "$title" "$([ "$((10#$n))" = "$(current)" ] && echo '   <- active')"
+  done
+  echo
+  dim "  ./lab start N   bring the stack up as challenge N and print the brief"
+  dim "  ./lab test      run the graded load test        ./lab help   everything else"
+}
+
+cmd_brief() { cat "$(cdir "${1:-$(current)}")/README.md"; }
+
+cmd_hint() {
+  local n d f k total
+  n=$(nn "${1:-$(current)}"); d=$(cdir "$n"); f="$STATE/hints-$n"
+  total=$(grep -c '^## Hint' "$d/hints.md")
+  k=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))
+  [ "$k" -gt "$total" ] && { k=$total; dim "(that was the last hint; ./lab solution $n shows the reference fix)"; }
+  echo "$k" > "$f"
+  awk -v k="$k" '/^## Hint/ {c++} c==k' "$d/hints.md"
+  echo; dim "hint $k of $total"
+}
+
+cmd_solution() {
+  local n; n=$(nn "${1:-$(current)}")
+  [ "${2:-}" = --yes ] || { read -r -p "Show the reference solution for challenge $n? This ends the puzzle. [y/N] " a; [ "$a" = y ] || exit 0; }
+  cat "solutions/$n-"*.md
+}
+
+# Rules the grader can check mechanically. The rest are in each brief.
+check_rules() {
+  local n=$1 v id
+  case "$n" in
+    02|03|06|07)
+      v=$(curl -fs "$APP_URL/actuator/metrics/hikaricp.connections.max" | grep -o '"value":[0-9.]*' | head -1 | cut -d: -f2)
+      [ -n "$v" ] || { echo "cannot read the pool size from $APP_URL/actuator/metrics (is the app up?)"; return 1; }
+      [ "${v%.*}" -le 10 ] || { echo "connection pool max is ${v%.*}; the rule is <= 10"; return 1; } ;;
+  esac
+  case "$n" in
+    04) check_limit app 0 $((1024 * 1024 * 1024)) || return 1 ;;
+    05) check_limit app 2000000000 $((768 * 1024 * 1024)) || return 1 ;;
+    06)
+        v=$(docker exec "$(cid db)" sh -c 'cat /sys/fs/cgroup/io.max' | grep -o 'wiops=[0-9]*' | cut -d= -f2)
+        [ -n "$v" ] && [ "$v" -le 400 ] || { echo "the db volume's IOPS cap was changed (wiops=${v:-max}); the rule is 400"; return 1; }
+        for v in fsync full_page_writes synchronous_commit; do
+          [ "$(psql_q -c "show $v")" = on ] || { echo "postgres setting '$v' must stay on (durability is not negotiable)"; return 1; }
+        done ;;
+  esac
+  return 0
+}
+
+check_limit() {   # service, max nano-cpus (0 = unchecked), max memory bytes
+  local id cpu mem; id=$(cid "$1")
+  cpu=$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$id"); mem=$(docker inspect -f '{{.HostConfig.Memory}}' "$id")
+  if [ "$2" -gt 0 ] && { [ "$cpu" -eq 0 ] || [ "$cpu" -gt "$2" ]; }; then echo "$1 container CPU limit is over budget"; return 1; fi
+  if [ "$mem" -eq 0 ] || [ "$mem" -gt "$3" ]; then echo "$1 container memory limit is over budget ($((mem / 1048576)) MiB)"; return 1; fi
+}
+
+run_k6() {   # script, then KEY=VALUE overrides
+  local script=$1 args=() kv; shift
+  for kv in "$@"; do args+=(-e "$kv"); done
+  k6 run --quiet "${args[@]}" "load/$script.js" 2> >(grep -v 'thresholds on metrics' >&2)
+}
+
+cmd_test() {
+  local n d label started0 started1 summary rc=0 why="" dur
+  case "${1:-}" in *=*|"") n=$(current) ;; *) n=$1; shift ;; esac
+  n=$(nn "$n"); d=$(cdir "$n")
+  [ "$((10#$n))" = "$(current)" ] || die "challenge $(current) is active. Run: ./lab start $((10#$n))"
+  # shellcheck disable=SC1090
+  TITLE= SCRIPT= RATE= WARMUP=30 DURATION=60 GOAL_P50= GOAL_P99= GOAL_P999= GOAL_ERRORS= BENCH=
+  . "$d/challenge.env"
+  [ -n "${BENCH:-}" ] && { cmd_bench graded; return; }
+  local kv; for kv in "$@"; do case "$kv" in RATE=*|WARMUP=*|DURATION=*) eval "$kv" ;; esac; done
+
+  wait_healthy app 120
+  why=$(check_rules "$n") || { bold "RULE BROKEN: $why"; exit 2; }
+
+  label="c$n/$(date +%H%M%S)"
+  summary="results/c$n-$(date +%Y%m%d-%H%M%S).json"
+  dur=$((WARMUP + DURATION + 8))
+  started0=$(docker inspect -f '{{.State.StartedAt}}' "$(cid app)")
+  psql_q -c "CALL ash.sample_loop($dur, '$label', 10)" >/dev/null 2>&1 &
+
+  bold "Challenge $n — $TITLE"
+  dim "  ${RATE}/s, ${WARMUP}s warm-up then ${DURATION}s measured · ASH label $label · Grafana http://localhost:3000"
+  run_k6 "$SCRIPT" "TITLE=$n · $TITLE" "RATE=$RATE" "WARMUP=$WARMUP" "DURATION=$DURATION" \
+         "GOAL_P50=$GOAL_P50" "GOAL_P99=$GOAL_P99" "GOAL_P999=$GOAL_P999" "GOAL_ERRORS=$GOAL_ERRORS" \
+         "SUMMARY=$summary" "$@" || rc=$?
+  echo "$label" > "$STATE/last-label"
+
+  started1=$(docker inspect -f '{{.State.StartedAt}}' "$(cid app)" 2>/dev/null || echo gone)
+  [ "$started0" = "$started1" ] || { rc=1; bold "  MISS  the app container restarted during the run"; }
+  why=$(check_rules "$n") || { rc=1; bold "  RULE BROKEN: $why"; }
+  [ "$#" -gt 0 ] && { dim "  (overrides given: not graded)"; return 0; }
+
+  if [ "$rc" -eq 0 ] && grep -q '"pass": true' "$summary"; then
+    cp "$summary" "$STATE/passed/$n"
+    printf '\033[1;32m  PASS\033[0m  challenge %s solved.  Now answer the questions at the end of the brief, then: ./lab start %d\n' "$n" "$((10#$n + 1))"
+  else
+    printf '\033[1;31m  FAIL\033[0m  not there yet.  ./lab ash · ./lab threads · ./lab profile cpu · ./lab hint\n'
+    return 1
+  fi
+}
+
+cmd_k6() {
+  local script=${1:?usage: ./lab k6 <workload> [KEY=VALUE ...]   workloads: $(ls load/*.js | xargs -n1 basename | sed 's/\.js$//' | tr '\n' ' ')}; shift
+  run_k6 "$script" "$@"
+}
+
+cmd_bench() {
+  local d out base score goal
+  d=$(cdir 8); . "$d/challenge.env"
+  bold "Challenge 08 — $TITLE"
+  dim "  building, then 8 rounds of 2s (the first 4 are warm-up) ..."
+  build app
+  # always the base deployment (4 CPUs), whatever challenge is active
+  out=$(docker compose -f compose.yaml run --rm --no-deps -T --entrypoint java app -Xms1g -Xmx1g -cp /app/app.jar \
+        -Dloader.main=lab.router.bench.HotPathBench org.springframework.boot.loader.launch.PropertiesLauncher "${@:2}" | tee /dev/stderr)
+  score=$(grep -o 'SCORE [0-9.]*' <<<"$out" | cut -d' ' -f2) || die "benchmark did not produce a score"
+  grep -q 'CHECK ok' <<<"$out" || { printf '\033[1;31m  FAIL\033[0m  results are wrong: fast but incorrect does not count\n'; return 1; }
+  [ -f "$STATE/bench-baseline" ] || { echo "$score" > "$STATE/bench-baseline"; dim "  recorded as your baseline"; }
+  base=$(cat "$STATE/bench-baseline")
+  goal=$(awk -v b="$base" -v x="$BENCH_SPEEDUP" 'BEGIN { printf "%.1f", b * x }')
+  printf '  baseline %s M ops/s   now %s M ops/s   (%.1fx)   goal %sx = %s M ops/s\n' "$base" "$score" "$(awk -v a="$score" -v b="$base" 'BEGIN { print a / b }')" "$BENCH_SPEEDUP" "$goal"
+  if awk -v a="$score" -v g="$goal" 'BEGIN { exit !(a >= g) }'; then
+    echo "{\"score\": $score, \"baseline\": $base}" > "$STATE/passed/08"
+    printf '\033[1;32m  PASS\033[0m  challenge 08 solved.\n'
+  else
+    printf '\033[1;31m  FAIL\033[0m  not there yet.\n'; return 1
+  fi
+}
+
+# ── instruments ──────────────────────────────────────────────────────────────
+cmd_psql() { if [ -t 0 ] && [ $# -eq 0 ]; then dc exec db psql -U postgres -d router; else dc exec -T db psql -U postgres -d router "$@"; fi; }
+
+cmd_ash() {
+  local label=${1:-$(cat "$STATE/last-label" 2>/dev/null || true)}
+  [ -n "$label" ] || die "no run yet"
+  local q="(SELECT * FROM ash.samples WHERE run_label = '$label' AND query NOT LIKE 'CALL ash.sample_loop%')" s
+  s="$q s"
+  bold "Active Session History for run '$label'"
+  dim "  AAS = average number of sessions in that state at once. 'idle in transaction' = the app holds the session but is doing something else."
+  cmd_psql -X -c "SELECT coalesce(wait_event_type, 'CPU') AS wait_class, coalesce(wait_event, 'on-cpu') AS wait_event,
+                         round(count(*)::numeric / (SELECT count(DISTINCT ts) FROM $s), 2) AS aas,
+                         round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct_of_db_time
+                  FROM $s GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 8" \
+           -c "SELECT state, round(count(*)::numeric / (SELECT count(DISTINCT ts) FROM $s), 2) AS aas, left(query, 100) AS query
+               FROM $s GROUP BY 1, 3 ORDER BY 2 DESC LIMIT 8" \
+           -c "SELECT round(count(*) / 10.0, 1) AS seconds_blocked, left(b.query, 60) AS blocked, left(k.query, 60) AS blocker
+               FROM $q b CROSS JOIN LATERAL unnest(b.blocking_pids) AS bp(pid)
+               LEFT JOIN ash.samples k ON k.ts = b.ts AND k.pid = bp.pid
+               WHERE b.blocking_pids IS NOT NULL GROUP BY 2, 3 ORDER BY 1 DESC LIMIT 5"
+}
+
+cmd_threads() {
+  local f="results/threads-$(date +%H%M%S).txt"
+  dc exec -T app jcmd 1 Thread.print > "$f"
+  bold "Request threads: state, and the first application frame on the stack (full dump: $f)"
+  awk 'function flush() { if (name ~ /http-nio.*exec/) print state " | " (frame == "" ? "(no application frame: idle)" : frame) }
+       /^"/ { flush(); name = $0; frame = ""; state = "" }
+       /java.lang.Thread.State:/ { state = $2 }
+       /at lab\.router\./ && frame == "" { sub(/^[ \t]+at /, ""); frame = $0 }
+       END { flush() }' "$f" | sort | uniq -c | sort -rn | head -12
+  echo; bold "All threads by state"
+  grep -o 'java.lang.Thread.State: [A-Z_]*' "$f" | cut -d' ' -f2 | sort | uniq -c | sort -rn | tr '\n' ' '; echo
+}
+
+cmd_profile() {
+  local ev=${1:-cpu} secs=${2:-30} f
+  f="flame-$ev-$(date +%H%M%S).html"
+  bold "async-profiler: $ev for ${secs}s (run this while load is on)"
+  dc exec -T app asprof -e "$ev" -d "$secs" -f "/results/$f" 1
+  echo "  open results/$f"
+}
+
+cmd_jfr() {
+  local secs=${1:-60} f
+  f="rec-$(date +%H%M%S).jfr"
+  dc exec -T app jcmd 1 JFR.start settings=profile duration="${secs}s" filename="/results/$f"
+  dim "  recording for ${secs}s -> results/$f    then e.g.:"
+  dim "    ./lab exec jfr summary /results/$f"
+  dim "    ./lab exec jfr view hot-methods /results/$f        (also: gc-pauses, contention-by-site, allocation-by-class)"
+}
+
+cmd_gc()   { dc exec -T app jstat -gcutil 1 1000 "${1:-15}"; }
+cmd_exec() { dc exec -T app "$@"; }
+
+cmd_top() {
+  local s id
+  docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.BlockIO}}' $(dc ps -q)
+  for s in app db; do
+    id=$(cid "$s"); echo
+    bold "$s: limits $(docker inspect -f 'cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} oomkilled={{.State.OOMKilled}} restarts={{.RestartCount}}' "$id")"
+    docker events --since 30m --until 0s --filter "container=$id" --format '{{.Action}} {{.Actor.Attributes.exitCode}}' 2>/dev/null \
+      | awk '/^oom/ { o++ } /^die 137/ { k++ } END { printf "last 30 min: killed with SIGKILL (exit 137) %d times, kernel OOM events %d\n", k, o }'
+    docker exec "$id" sh -c 'grep -E "nr_periods|nr_throttled|throttled_usec" /sys/fs/cgroup/cpu.stat; echo "memory.current $(cat /sys/fs/cgroup/memory.current)"; grep -E "^(anon|file) " /sys/fs/cgroup/memory.stat; grep -E "oom_kill " /sys/fs/cgroup/memory.events; echo "io.max $(cat /sys/fs/cgroup/io.max)"'
+  done
+}
+
+cmd_help() {
+  cat <<'EOF'
+Challenges
+  ./lab                     list challenges and progress
+  ./lab start N             bring the stack up as challenge N, print its brief
+  ./lab brief [N]           print the brief again
+  ./lab test                graded run of the active challenge (PASS / FAIL)
+  ./lab test KEY=VALUE      ungraded run with overrides, e.g. RATE=100 DURATION=20
+  ./lab bench               challenge 08's benchmark (same as ./lab test when 08 is active)
+  ./lab hint                next hint for the active challenge (they get more specific)
+  ./lab solution [N]        reference solution (spoiler)
+
+Changing things
+  ./lab deploy              rebuild the app from app/ and restart it
+  ./lab restart [svc...]    re-create services after editing compose / config files
+  ./lab migrate             apply new files in db/migrations/
+  ./lab reseed              rebuild the database from scratch
+
+Looking at things
+  ./lab top                 CPU / memory / IO per container, cgroup throttling, OOM kills
+  ./lab ash [label]         where database time went during the last run
+  ./lab psql [-c ...]       psql as superuser
+  ./lab threads             thread dump, summarised
+  ./lab profile cpu|alloc|lock|wall [secs]    async-profiler flame graph -> results/
+  ./lab jfr [secs]          Java Flight Recorder -> results/
+  ./lab gc [secs]           jstat -gcutil, one line per second
+  ./lab exec CMD...         run something inside the app container (jcmd 1 help, jfr, ...)
+  ./lab logs [svc]          container logs
+  ./lab k6 WORKLOAD K=V     free-form k6 run (see load/)
+  Grafana http://localhost:3000 · Prometheus http://localhost:9090 · app http://localhost:8080
+EOF
+}
+
+c=${1:-list}; shift || true
+case "$c" in
+  list|status) cmd_list ;;
+  start|up) cmd_start "$@" ;;
+  brief|deploy|restart|down|logs|migrate|reseed|hint|solution|test|k6|bench|psql|ash|threads|profile|jfr|gc|exec|top|help) "cmd_$c" "$@" ;;
+  -h|--help) cmd_help ;;
+  *) die "unknown command '$c' -- ./lab help" ;;
+esac

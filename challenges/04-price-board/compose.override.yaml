@@ -1,0 +1,9 @@
+# The router as deployed for the price-board rollout: a 768 MiB container,
+# and a busy market session.
+services:
+  app:
+    mem_limit: 768m
+    memswap_limit: 768m
+    environment:
+      JDK_JAVA_OPTIONS: "-Xms400m -Xmx400m"
+      ROUTER_MARKET_TRADES_PER_SECOND: 50000

@@ -1,0 +1,18 @@
+--- a/challenges/05-small-pod/compose.override.yaml
++++ b/challenges/05-small-pod/compose.override.yaml
+@@ -1,11 +1,9 @@
+-# The router on the shared container platform, with the platform's default
+-# sizing for a "small" service. Same busy market session as challenge 04.
+ services:
+   app:
+-    cpus: 0.5
+-    mem_limit: 640m
+-    memswap_limit: 640m
++    cpus: 2
++    mem_limit: 768m
++    memswap_limit: 768m
+     restart: always
+     environment:
+-      JDK_JAVA_OPTIONS: "-Xms560m -Xmx560m"
++      JDK_JAVA_OPTIONS: "-Xms480m -Xmx480m -XX:+UseG1GC"
+       ROUTER_MARKET_TRADES_PER_SECOND: 50000

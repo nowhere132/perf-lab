@@ -1,0 +1,15 @@
+--- /dev/null
++++ b/db/migrations/001-orders-by-account.sql
+@@ -0,0 +1 @@
++CREATE INDEX IF NOT EXISTS orders_account_created_idx ON orders (account_id, created_at DESC);
+--- a/app/src/main/resources/application.yaml
++++ b/app/src/main/resources/application.yaml
+@@ -12,6 +12,8 @@
+     open-in-view: false
+     hibernate:
+       ddl-auto: none
++    properties:
++      hibernate.default_batch_fetch_size: 100
+ 
+ server:
+   port: 8080

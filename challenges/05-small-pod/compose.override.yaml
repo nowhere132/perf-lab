@@ -1,0 +1,11 @@
+# The router on the shared container platform, with the platform's default
+# sizing for a "small" service. Same busy market session as challenge 04.
+services:
+  app:
+    cpus: 0.5
+    mem_limit: 640m
+    memswap_limit: 640m
+    restart: always
+    environment:
+      JDK_JAVA_OPTIONS: "-Xms560m -Xmx560m"
+      ROUTER_MARKET_TRADES_PER_SECOND: 50000

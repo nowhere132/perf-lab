@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: order-router
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/router
+    username: router
+    password: router
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 5000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+
+server:
+  port: 8080
+  tomcat:
+    mbeanregistry:
+      enabled: true
+
+router:
+  risk-url: ${SIM_URL:http://localhost:9000}
+  venue-url: ${SIM_URL:http://localhost:9000}
+  refdata:
+    refresh-interval: PT6H
+  market:
+    ticks-per-symbol: 1000
+    trades-per-second: 2000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,threaddump
+  metrics:
+    tags:
+      application: order-router
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
