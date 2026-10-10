@@ -10,11 +10,13 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.Table;
+import lombok.Getter;
 
 import java.time.Instant;
 
 @Entity
 @Table(name = "order_events")
+@Getter
 public class OrderEvent {
     @Id
     @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "order_events_seq")
@@ -36,9 +38,4 @@ public class OrderEvent {
         this.detail = detail;
         this.createdAt = Instant.now();
     }
-
-    public Long getId() { return id; }
-    public String getType() { return type; }
-    public String getDetail() { return detail; }
-    public Instant getCreatedAt() { return createdAt; }
 }

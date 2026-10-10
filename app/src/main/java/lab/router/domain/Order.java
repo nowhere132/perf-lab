@@ -11,6 +11,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.Table;
+import lombok.Getter;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -19,6 +20,7 @@ import java.util.List;
 
 @Entity
 @Table(name = "orders")
+@Getter
 public class Order {
     @Id
     @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "orders_seq")
@@ -42,10 +44,10 @@ public class Order {
     private Instant updatedAt;
 
     @OneToMany(mappedBy = "order", fetch = FetchType.LAZY)
-    private List<Fill> fills = new ArrayList<>();
+    private final List<Fill> fills = new ArrayList<>();
 
     @OneToMany(mappedBy = "order", fetch = FetchType.LAZY)
-    private List<OrderEvent> events = new ArrayList<>();
+    private final List<OrderEvent> events = new ArrayList<>();
 
     protected Order() {}
 
@@ -71,18 +73,4 @@ public class Order {
         this.status = OrderStatus.REJECTED;
         this.updatedAt = Instant.now();
     }
-
-    public Long getId() { return id; }
-    public Long getAccountId() { return accountId; }
-    public String getSymbol() { return symbol; }
-    public Side getSide() { return side; }
-    public int getQty() { return qty; }
-    public BigDecimal getPrice() { return price; }
-    public OrderStatus getStatus() { return status; }
-    public String getVenue() { return venue; }
-    public String getVenueOrderId() { return venueOrderId; }
-    public Instant getCreatedAt() { return createdAt; }
-    public Instant getUpdatedAt() { return updatedAt; }
-    public List<Fill> getFills() { return fills; }
-    public List<OrderEvent> getEvents() { return events; }
 }

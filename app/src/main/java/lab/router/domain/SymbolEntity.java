@@ -4,11 +4,13 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import lombok.Getter;
 
 import java.math.BigDecimal;
 
 @Entity
 @Table(name = "symbols")
+@Getter
 public class SymbolEntity {
     @Id
     private String symbol;
@@ -23,11 +25,4 @@ public class SymbolEntity {
     private int lotSize;
 
     protected SymbolEntity() {}
-
-    public String getSymbol() { return symbol; }
-    public String getBoard() { return board; }
-    public BigDecimal getRefPrice() { return refPrice; }
-    public BigDecimal getBandPct() { return bandPct; }
-    public BigDecimal getTickSize() { return tickSize; }
-    public int getLotSize() { return lotSize; }
 }

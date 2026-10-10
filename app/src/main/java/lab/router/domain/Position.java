@@ -5,10 +5,12 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.IdClass;
 import jakarta.persistence.Table;
+import lombok.Getter;
 
 @Entity
 @Table(name = "positions")
 @IdClass(PositionId.class)
+@Getter
 public class Position {
     @Id
     @Column(name = "account_id")
@@ -21,10 +23,6 @@ public class Position {
 
     protected Position() {}
 
-    public Long getAccountId() { return accountId; }
-    public String getSymbol() { return symbol; }
-    public long getQty() { return qty; }
-    public long getHeldQty() { return heldQty; }
     public long sellable() { return qty - heldQty; }
     public void hold(long n) { heldQty += n; }
     public void release(long n) { heldQty -= n; }

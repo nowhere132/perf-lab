@@ -7,12 +7,14 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import lombok.Getter;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 
 @Entity
 @Table(name = "fills")
+@Getter
 public class Fill {
     @Id
     private Long id;
@@ -25,9 +27,4 @@ public class Fill {
     private Instant executedAt;
 
     protected Fill() {}
-
-    public Long getId() { return id; }
-    public int getQty() { return qty; }
-    public BigDecimal getPrice() { return price; }
-    public Instant getExecutedAt() { return executedAt; }
 }
