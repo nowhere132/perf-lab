@@ -3,6 +3,7 @@ package lab.router.api;
 import lab.router.service.AccountService;
 import lab.router.service.OrderHistoryService;
 import lab.router.service.OrderView;
+import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -13,14 +14,10 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/accounts")
+@RequiredArgsConstructor
 public class AccountController {
     private final AccountService accountService;
     private final OrderHistoryService history;
-
-    public AccountController(AccountService accountService, OrderHistoryService history) {
-        this.accountService = accountService;
-        this.history = history;
-    }
 
     @GetMapping("/{id}")
     public AccountService.AccountView account(@PathVariable long id) {

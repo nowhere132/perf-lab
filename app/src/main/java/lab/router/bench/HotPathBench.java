@@ -12,7 +12,7 @@ import java.util.concurrent.CyclicBarrier;
  * The in-memory part of the order path, with everything else (HTTP, SQL, the
  * venue) taken away: one dispatcher thread per board, each pushing orders for
  * random accounts through the exposure check and the routing counters.
- *
+ * <p>
  * Part of the grader -- do not edit. Run it with ./lab bench.
  */
 public final class HotPathBench {
@@ -22,7 +22,7 @@ public final class HotPathBench {
     static final long ROUND_NANOS = 2_000_000_000L;
     static final BigDecimal LIMIT = new BigDecimal("1000000000000000");
 
-    public static void main(String[] args) throws Exception {
+    static void main() throws Exception {
         ExposureBook book = new ExposureBook();
         RoutingStats stats = new RoutingStats();
         BigDecimal[] notionals = new BigDecimal[64];

@@ -15,12 +15,14 @@ import lab.router.repo.OrderRepository;
 import lab.router.repo.PositionRepository;
 import lab.router.risk.ExposureBook;
 import lab.router.risk.RoutingStats;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 
 @Service
+@RequiredArgsConstructor
 public class OrderService {
     private static final BigDecimal EXPOSURE_LIMIT_PER_TIER = new BigDecimal("50000000000");
 
@@ -34,22 +36,6 @@ public class OrderService {
     private final VenueGateway venueGateway;
     private final ExposureBook exposureBook;
     private final RoutingStats routingStats;
-
-    public OrderService(ReferenceData referenceData, OrderValidator validator, AccountRepository accounts,
-                        PositionRepository positions, OrderRepository orders, OrderEventRepository events,
-                        RiskClient riskClient, VenueGateway venueGateway, ExposureBook exposureBook,
-                        RoutingStats routingStats) {
-        this.referenceData = referenceData;
-        this.validator = validator;
-        this.accounts = accounts;
-        this.positions = positions;
-        this.orders = orders;
-        this.events = events;
-        this.riskClient = riskClient;
-        this.venueGateway = venueGateway;
-        this.exposureBook = exposureBook;
-        this.routingStats = routingStats;
-    }
 
     /**
      * Validate, reserve cash (buy) or stock (sell), clear pre-trade risk, send

@@ -4,6 +4,7 @@ import lab.router.domain.SymbolEntity;
 import lab.router.domain.TradingLimit;
 import lab.router.repo.SymbolRepository;
 import lab.router.repo.TradingLimitRepository;
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -25,6 +26,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * cache is reloaded on a timer (router.refdata.refresh-interval).
  */
 @Component
+@RequiredArgsConstructor
 public class ReferenceData {
     private static final Logger log = LoggerFactory.getLogger(ReferenceData.class);
     private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
@@ -33,11 +35,6 @@ public class ReferenceData {
     private final TradingLimitRepository limits;
     private final Map<String, SymbolRef> bySymbol = new HashMap<>();
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
-
-    public ReferenceData(SymbolRepository symbols, TradingLimitRepository limits) {
-        this.symbols = symbols;
-        this.limits = limits;
-    }
 
     @PostConstruct
     @Scheduled(initialDelayString = "${router.refdata.refresh-interval}",

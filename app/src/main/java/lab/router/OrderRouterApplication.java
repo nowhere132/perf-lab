@@ -7,7 +7,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @SpringBootApplication
 @EnableScheduling
 public class OrderRouterApplication {
-    public static void main(String[] args) {
+    static void main(String[] args) {
         SpringApplication.run(OrderRouterApplication.class, args);
     }
 }

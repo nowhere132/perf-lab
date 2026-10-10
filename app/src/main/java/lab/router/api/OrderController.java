@@ -4,6 +4,7 @@ import lab.router.domain.Order;
 import lab.router.domain.Side;
 import lab.router.service.OrderService;
 import lab.router.service.PlaceOrderCommand;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -15,16 +16,13 @@ import java.math.BigDecimal;
 
 @RestController
 @RequestMapping("/api/orders")
+@RequiredArgsConstructor
 public class OrderController {
     public record PlaceOrderRequest(long accountId, String symbol, Side side, int qty, BigDecimal price) {}
 
     public record PlaceOrderResponse(long orderId, String status, String venue, String venueOrderId) {}
 
     private final OrderService orderService;
-
-    public OrderController(OrderService orderService) {
-        this.orderService = orderService;
-    }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)

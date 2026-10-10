@@ -1,5 +1,6 @@
 package lab.router.market;
 
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -9,14 +10,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Service
+@RequiredArgsConstructor
 public class PriceBoardService {
     private final ReferenceData referenceData;
     private final TickStore tickStore;
-
-    public PriceBoardService(ReferenceData referenceData, TickStore tickStore) {
-        this.referenceData = referenceData;
-        this.tickStore = tickStore;
-    }
 
     public List<BoardRow> board(String board, int offset, int limit) {
         List<SymbolRef> symbols = referenceData.board(board);
