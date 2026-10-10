@@ -77,10 +77,31 @@ cmd_deploy() {
   dim "  app is up. JIT is cold; ./lab test warms it up before measuring."
 }
 
+# Re-create services. The app is baked into its image (config files included),
+# so restarting it always rebuilds first; db and the rest read mounted files.
 cmd_restart() {
-  local s
-  dc up -d --force-recreate --no-deps "${@:-app}" 2>&1 | grep -iE 'error' || true
-  for s in "${@:-app}"; do wait_healthy "$s" 300; done
+  local svcs=("$@") s id before after t0 pool
+  [ ${#svcs[@]} -gt 0 ] || svcs=(app)
+  for s in "${svcs[@]}"; do
+    bold "== $s"
+    id=$(cid "$s")
+    before=$(docker inspect -f '{{.Image}}' "$id" 2>/dev/null | cut -c8-19)
+    if [ "$s" = app ] || [ "$s" = exchange-sim ]; then
+      printf '  [1/4] building image ... '
+      t0=$(date +%s); build "$s"
+      after=$(docker image inspect "perflab-$s" -f '{{.Id}}' | cut -c8-19)
+      if [ "$before" = "$after" ]; then echo "$(( $(date +%s) - t0 ))s, image unchanged ($after): nothing in $s/ differs from what is running"
+      else echo "$(( $(date +%s) - t0 ))s, new image $after (was ${before:-none})"; fi
+    else
+      echo "  [1/4] no image to build ($s runs a stock image; config is mounted)"
+    fi
+    echo "  [2/4] recreating container"
+    dc up -d --force-recreate --no-deps "$s" > "$STATE/up.log" 2>&1 || { tail -5 "$STATE/up.log"; die "recreate failed"; }
+    printf '  [3/4] waiting for healthy ... '
+    t0=$(date +%s); wait_healthy "$s" 300; echo "ok after $(( $(date +%s) - t0 ))s"
+    id=$(cid "$s")
+    echo "  [4/4] running: image $(docker inspect -f '{{.Image}}' "$id" | cut -c8-19), started $(docker inspect -f '{{.State.StartedAt}}' "$id" | cut -c1-19)Z"
+  done
   dc up -d >/dev/null 2>&1; wait_healthy app 180
 }
 cmd_down()    { dc down --remove-orphans; }
@@ -326,7 +347,7 @@ Challenges
 
 Changing things
   ./lab deploy              rebuild the app from app/ and restart it
-  ./lab restart [svc...]    re-create services after editing compose / config files
+  ./lab restart [svc...]    rebuild (app) and re-create services, with progress; prints the live pool size
   ./lab migrate             apply new files in db/migrations/
   ./lab reseed              rebuild the database from scratch
 
