@@ -49,6 +49,10 @@ export function plan(title) {
 
 export const params = { timeout: '10s', headers: { 'Content-Type': 'application/json' } };
 
+// Requests whose URL carries an id or offset must be grouped under one `name`
+// tag, otherwise k6 creates a time series per distinct URL (100k+ in a graded run).
+export const named = (name) => ({ ...params, tags: { name } });
+
 const ms = (v) => (v === undefined ? '-' : v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${v.toFixed(1)}ms`);
 
 export function report() {
