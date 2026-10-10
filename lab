@@ -229,8 +229,8 @@ cmd_bench() {
   dim "  building, then 8 rounds of 2s (the first 4 are warm-up) ..."
   build app
   # always the base deployment (4 CPUs), whatever challenge is active
-  out=$(docker compose -f compose.yaml run --rm --no-deps -T --entrypoint java app -Xms1g -Xmx1g -cp /app/app.jar \
-        -Dloader.main=lab.router.bench.HotPathBench org.springframework.boot.loader.launch.PropertiesLauncher "${@:2}" | tee /dev/stderr)
+  out=$(docker compose -f compose.yaml run --rm --no-deps -T --entrypoint java app -Xms1g -Xmx1g -cp /app/order-router.jar \
+        lab.router.bench.HotPathBench "${@:2}" | tee /dev/stderr)
   score=$(grep -o 'SCORE [0-9.]*' <<<"$out" | cut -d' ' -f2) || die "benchmark did not produce a score"
   grep -q 'CHECK ok' <<<"$out" || { printf '\033[1;31m  FAIL\033[0m  results are wrong: fast but incorrect does not count\n'; return 1; }
   [ -f "$STATE/bench-baseline" ] || { echo "$score" > "$STATE/bench-baseline"; dim "  recorded as your baseline"; }
